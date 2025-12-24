@@ -44,6 +44,7 @@
             overflow: hidden;
             border: 2px solid #333;
             box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            background: #000; /* Prevent white flash */
         }
         #cam-preview {
             width: 100%; height: 100%; object-fit: cover;
@@ -53,6 +54,14 @@
             position: absolute; bottom: 0; left: 0; width: 100%;
             background: rgba(0,0,0,0.7); color: #fff; font-size: 10px;
             text-align: center; padding: 2px 0;
+            z-index: 2;
+        }
+        /* Rescue Button */
+        #restart-cam {
+            position: absolute; top: 5px; right: 5px;
+            background: rgba(255, 0, 0, 0.7); color: white;
+            border: none; border-radius: 3px; font-size: 9px;
+            cursor: pointer; padding: 2px 5px; z-index: 5;
         }
 
         .instructions {
@@ -126,7 +135,8 @@
             </label>
 
             <div class="cam-wrapper">
-                <video id="cam-preview" playsinline></video>
+                <button id="restart-cam" onclick="forceRestartCamera()">Restart Cam</button>
+                <video id="cam-preview" playsinline autoplay muted></video>
                 <div class="cam-overlay">Vision AI Active</div>
             </div>
         </div>
@@ -150,17 +160,21 @@
         let scene, camera, renderer, composer;
         let particlesMesh, photoGroup = new THREE.Group();
         let particleData = [];
-        let photos = []; // Array of meshes
+        let photos = []; 
         let dummy = new THREE.Object3D();
-        
         let animVal = { val: 0 };
         let activePhotoIndex = -1;
+
+        // --- MediaPipe Globals ---
+        let hands;
+        let videoElement;
+        let cameraActive = false;
 
         // --- Init ---
         window.onload = () => {
             initThree();
             initScene();
-            initMediaPipe();
+            initMediaPipeManual(); // Use manual loop
             
             setTimeout(() => {
                 document.getElementById('loader').style.opacity = 0;
@@ -168,6 +182,14 @@
             }, 2000);
 
             document.getElementById('photo-upload').addEventListener('change', handleUpload);
+            
+            // Fix: Wake up camera when window regains focus (after file picker closes)
+            window.addEventListener('focus', () => {
+                if(videoElement && videoElement.paused) {
+                    console.log("Window focused, waking up camera...");
+                    videoElement.play().catch(e => console.log("Play rejected:", e));
+                }
+            });
         };
 
         // --- Three.js Setup ---
@@ -250,10 +272,8 @@
             const angle = t * Math.PI * 6;
             const radius = 12 * (1-t) + 2;
             const height = t * 30 - 15;
-
             mesh.position.set(Math.cos(angle)*radius, height, Math.sin(angle)*radius);
             mesh.lookAt(0, height, 0);
-            
             mesh.userData = {
                 originPos: mesh.position.clone(),
                 originRot: mesh.rotation.clone(),
@@ -261,18 +281,19 @@
             };
         }
 
-        // --- SAFE Photo Handling ---
+        // --- UPLOAD HANDLING (Stable) ---
         async function handleUpload(e) {
             const files = Array.from(e.target.files);
+            // Even if cancel is clicked, we should check camera
+            setTimeout(ensureCameraRunning, 500); 
+
             if(files.length === 0) return;
 
             const btnText = document.getElementById('upload-text');
             btnText.innerText = "Processing...";
 
-            // 1. Reset logic state immediately to prevent crashes during upload
+            // Reset Logic
             activePhotoIndex = -1;
-            
-            // If we are currently zoomed in, reset camera softly
             if(currentState === STATE.ZOOM) {
                 gsap.to(camera.position, {x:0, y:2, z:40, duration:1});
                 gsap.to(camera.rotation, {x:0, y:0, z:0, duration:1});
@@ -280,7 +301,6 @@
             }
 
             try {
-                // 2. Load all textures first (Don't touch the scene yet)
                 const promises = files.map(file => {
                     return new Promise(resolve => {
                         const reader = new FileReader();
@@ -299,53 +319,59 @@
 
                 const loadedData = await Promise.all(promises);
 
-                // 3. Atomic Swap: Clear old, Add new in one go (Synchronous part)
-                // Remove old meshes from scene
                 while(photoGroup.children.length > 0) {
                     const old = photoGroup.children[0];
                     if(old.geometry) old.geometry.dispose();
                     if(old.material) old.material.dispose();
                     photoGroup.remove(old);
                 }
-                photos = []; // Reset array
+                photos = [];
 
-                // Create new meshes
                 loadedData.forEach((data, i) => {
                     const h = 4;
                     const w = h * data.ratio;
                     const geo = new THREE.PlaneGeometry(w, h);
                     const mat = new THREE.MeshBasicMaterial({ map: data.tex, side: THREE.DoubleSide });
                     const mesh = new THREE.Mesh(geo, mat);
-                    
                     const border = new THREE.Mesh(new THREE.PlaneGeometry(w+0.2, h+0.2), new THREE.MeshBasicMaterial({color:0xffffff}));
                     border.position.z = -0.05;
                     mesh.add(border);
-
                     setupMeshPos(mesh, i, loadedData.length);
                     photoGroup.add(mesh);
                     photos.push(mesh);
                 });
                 
                 updateStatus(`Loaded ${loadedData.length} Photos!`);
-                
-                // 4. Reset Animations to Tree
                 gsap.killTweensOf(animVal);
                 animVal.val = 0; 
                 currentState = STATE.TREE;
-
-                // 5. Ensure Video didn't freeze (Mobile bug fix)
-                const vid = document.getElementById('cam-preview');
-                if(vid.paused) vid.play();
 
             } catch (err) {
                 console.error("Upload Error:", err);
                 updateStatus("Upload Failed");
             } finally {
                 btnText.innerText = "Upload Memories";
+                ensureCameraRunning(); // Vital check
             }
         }
 
-        // --- Loop ---
+        // --- Camera Stability Logic ---
+        function ensureCameraRunning() {
+            if(videoElement && videoElement.paused && videoElement.srcObject) {
+                console.log("Force resuming video...");
+                videoElement.play();
+            }
+        }
+
+        async function forceRestartCamera() {
+             if(videoElement && videoElement.srcObject) {
+                 const tracks = videoElement.srcObject.getTracks();
+                 tracks.forEach(t => t.stop());
+             }
+             initMediaPipeManual();
+        }
+
+        // --- Main Loop ---
         function animate() {
             requestAnimationFrame(animate);
             const time = Date.now() * 0.001;
@@ -366,10 +392,10 @@
             }
             particlesMesh.instanceMatrix.needsUpdate = true;
 
-            // Photos - Safe Update
+            // Photos
             if(currentState !== STATE.ZOOM && photos.length > 0) {
                 photos.forEach(p => {
-                    if(!p.userData || !p.userData.originPos) return; // Safety check
+                    if(!p.userData.originPos) return;
                     p.position.lerpVectors(p.userData.originPos, p.userData.scatterPos, animVal.val);
                     if(animVal.val > 0.8) p.lookAt(camera.position);
                     else {
@@ -381,25 +407,29 @@
             }
 
             composer.render();
+            
+            // --- Manual Hand Detection Loop ---
+            // We run this inside requestAnimationFrame for better sync
+            if (hands && videoElement && videoElement.readyState >= 2 && !videoElement.paused) {
+                hands.send({image: videoElement}).catch(e => {
+                    // Ignore transient frame errors
+                });
+            }
         }
         animate();
 
-        // --- Logic ---
+        // --- Logic Transitions ---
         function toTree() {
             if(currentState === STATE.TREE || isAnimating) return;
             isAnimating = true;
             currentState = STATE.TREE;
             updateStatus("Mode: Christmas Tree");
-
             gsap.to(camera.position, {x: 0, y: 2, z: 40, duration: 1.5});
             gsap.to(camera.rotation, {x:0, y:0, z:0, duration: 1.5});
-            
-            // Safe Reset of zoomed photo
             if(activePhotoIndex !== -1 && photos[activePhotoIndex]) {
                 gsap.to(photos[activePhotoIndex].scale, {x:1, y:1, z:1, duration: 1});
             }
             activePhotoIndex = -1;
-
             gsap.to(animVal, { val: 0, duration: 2, ease: "power2.inOut", onComplete: () => isAnimating = false });
         }
 
@@ -408,36 +438,24 @@
             isAnimating = true;
             currentState = STATE.SCATTER;
             updateStatus("Mode: Starry Sky");
-            
-            // Safe Reset if coming from Zoom
             if(activePhotoIndex !== -1 && photos[activePhotoIndex]) {
                  gsap.to(photos[activePhotoIndex].scale, {x:1, y:1, z:1, duration: 1});
             }
             activePhotoIndex = -1;
-
             gsap.to(animVal, { val: 1, duration: 2.5, ease: "power3.out", onComplete: () => isAnimating = false });
         }
 
         function toZoom() {
             if(currentState === STATE.ZOOM || isAnimating) return;
-            // CRITICAL FIX: Don't zoom if no photos exist
-            if(photos.length === 0) {
-                updateStatus("No Photos to Zoom!");
-                return;
-            }
-
+            if(photos.length === 0) { updateStatus("No Photos!"); return; }
             isAnimating = true;
             currentState = STATE.ZOOM;
             updateStatus("Mode: Memory View");
-
             activePhotoIndex = Math.floor(Math.random() * photos.length);
             const target = photos[activePhotoIndex];
-
-            // Calculate position in front of camera
             const vec = new THREE.Vector3(0, 0, -8);
             vec.applyQuaternion(camera.quaternion);
             vec.add(camera.position);
-
             gsap.to(target.position, { x: vec.x, y: vec.y, z: vec.z, duration: 1.5, ease: "back.out(1.2)" });
             gsap.to(target.rotation, { x: camera.rotation.x, y: camera.rotation.y, z: camera.rotation.z, duration: 1.5 });
             gsap.to(target.scale, {x: 2, y: 2, z: 2, duration: 1.5, onComplete: () => isAnimating = false});
@@ -454,42 +472,44 @@
             }, 1000);
         }
 
-        // --- Vision ---
-        function initMediaPipe() {
-            const video = document.getElementById('cam-preview');
-            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        // --- Manual MediaPipe Init (NO CAMERA UTILS) ---
+        async function initMediaPipeManual() {
+            videoElement = document.getElementById('cam-preview');
             
+            hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
             hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
 
             let gestureBuffer = []; 
 
             hands.onResults(results => {
-                try {
-                    if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
-                    
-                    const lm = results.multiHandLandmarks[0];
-                    const gesture = detectGesture(lm);
-                    
-                    gestureBuffer.push(gesture);
-                    if(gestureBuffer.length > 5) gestureBuffer.shift();
-                    
-                    const counts = {};
-                    gestureBuffer.forEach(x => counts[x] = (counts[x] || 0) + 1);
-                    const stableGesture = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+                if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+                const lm = results.multiHandLandmarks[0];
+                const gesture = detectGesture(lm);
+                
+                gestureBuffer.push(gesture);
+                if(gestureBuffer.length > 5) gestureBuffer.shift();
+                
+                const counts = {};
+                gestureBuffer.forEach(x => counts[x] = (counts[x] || 0) + 1);
+                const stableGesture = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
 
-                    if (stableGesture === 'fist') toTree();
-                    else if (stableGesture === 'open') toScatter();
-                    else if (stableGesture === 'pinch') toZoom();
-                } catch(e) {
-                    console.warn("Gesture Error:", e);
-                }
+                if (stableGesture === 'fist') toTree();
+                else if (stableGesture === 'open') toScatter();
+                else if (stableGesture === 'pinch') toZoom();
             });
 
-            const camera = new Camera(video, {
-                onFrame: async () => { await hands.send({image: video}); },
-                width: 320, height: 240
-            });
-            camera.start();
+            // Raw Camera Access
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+                videoElement.srcObject = stream;
+                videoElement.onloadedmetadata = () => {
+                    videoElement.play();
+                    cameraActive = true;
+                };
+            } catch (err) {
+                console.error("Camera Error:", err);
+                updateStatus("Camera Denied");
+            }
         }
 
         function detectGesture(lm) {
