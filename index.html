@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Magical Gesture Xmas Tree (Ultimate)</title>
+    <title>Magical Gesture Xmas Tree (Final Fix)</title>
     
     <style>
         body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
@@ -37,6 +37,7 @@
             pointer-events: auto; width: 100%; max-width: 1200px; margin: 0 auto;
         }
 
+        /* Camera Preview Container */
         .cam-wrapper {
             position: relative;
             width: 160px; height: 120px;
@@ -51,13 +52,22 @@
             transform: scaleX(-1);
             background: #000;
         }
-        /* Indicator: Red=Stop, Yellow=Load, Green=OK */
+        
+        /* Indicators & Buttons */
         #vision-indicator {
             position: absolute; top: 10px; left: 10px;
             width: 12px; height: 12px; border-radius: 50%;
-            background: #ff0000; /* Default Red */
+            background: blue; 
             z-index: 5; border: 2px solid #fff; box-shadow: 0 0 5px #000;
         }
+        #manual-restart {
+            position: absolute; bottom: 5px; right: 5px;
+            background: rgba(255,255,255,0.2); color: white;
+            border: 1px solid rgba(255,255,255,0.4);
+            font-size: 10px; padding: 2px 6px; cursor: pointer;
+            z-index: 6; border-radius: 4px;
+        }
+        #manual-restart:hover { background: rgba(255,255,255,0.4); }
 
         .instructions {
             background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);
@@ -88,17 +98,8 @@
             animation: spin 1s linear infinite;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        
-        /* Warning for file:// protocol */
-        #protocol-warning {
-            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(50,0,0,0.95); z-index: 200;
-            flex-direction: column; justify-content: center; align-items: center;
-            color: #ff5555; text-align: center; padding: 20px;
-        }
     </style>
 
-    <!-- LOAD EXTERNAL LIBS -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
@@ -114,21 +115,16 @@
 </head>
 <body>
 
-    <div id="protocol-warning">
-        <h1>⚠️ Security Block ⚠️</h1>
-        <p>Browsers block Camera access on local files (file://).</p>
-        <p style="color:white; margin-top:10px;">Please run this via a Local Server or VSCode Live Server.</p>
-    </div>
-
     <div id="loader">
         <div class="spinner"></div>
-        <div style="margin-top:20px; color:#D4AF37; letter-spacing: 2px;">LOADING LIBS...</div>
+        <div style="margin-top:20px; color:#D4AF37; letter-spacing: 2px;">STARTING MAGIC...</div>
+        <div style="font-size:12px; color:#666; margin-top:10px;">Allow Camera Access</div>
     </div>
 
     <div id="ui-layer">
         <div class="header">
             <h1>Gesture Christmas Tree</h1>
-            <div id="status-box">Init...</div>
+            <div id="status-box">System Initializing...</div>
         </div>
 
         <div class="controls-area">
@@ -144,172 +140,156 @@
             </label>
 
             <div class="cam-wrapper">
-                <div id="vision-indicator" title="Red:Off, Yellow:Load, Green:Working"></div>
+                <div id="vision-indicator" title="Status Indicator"></div>
                 <video id="cam-preview" playsinline autoplay muted></video>
+                <button id="manual-restart" onclick="restartCameraForce()">Restart Cam</button>
             </div>
         </div>
     </div>
 
     <script>
-        // --- 1. Protocol Check (Must run first) ---
-        if (window.location.protocol === 'file:') {
-            document.getElementById('protocol-warning').style.display = 'flex';
-            throw new Error("Local file execution blocked by browser security.");
-        }
-
         // --- Configuration ---
         const CONFIG = {
             particleCount: 3000,
             colors: [0x22dd88, 0xffeb3b, 0xff3333, 0xffffff],
-            bloomStrength: 1.8, bloomThreshold: 0, bloomRadius: 0.6
+            bloomStrength: 1.8,
+            bloomThreshold: 0,
+            bloomRadius: 0.6
         };
 
         const STATE = { TREE: 'tree', SCATTER: 'scatter', ZOOM: 'zoom' };
         let currentState = STATE.TREE;
         let isAnimating = false;
 
-        // --- Globals ---
+        // --- Three.js Globals ---
         let scene, camera, renderer, composer;
         let particlesMesh, photoGroup = new THREE.Group();
-        let particleData = [], photos = []; 
+        let particleData = [];
+        let photos = []; 
         let dummy = new THREE.Object3D();
         let animVal = { val: 0 };
         let activePhotoIndex = -1;
 
-        // --- Vision Globals ---
-        let hands, videoElement, visionLoopId;
+        // --- Vision System Globals ---
+        let hands;
+        let videoElement;
+        let visionLoopId;
 
+        // --- Init ---
         window.onload = () => {
-            document.getElementById('status-box').innerText = "Starting 3D...";
             initThree();
             initScene();
+            initVisionSystem(); 
             
-            document.getElementById('status-box').innerText = "Starting Vision...";
-            // Delay vision init slightly to allow UI to render
-            setTimeout(initVisionSystem, 500);
-
-            // Hide Loader
             setTimeout(() => {
                 document.getElementById('loader').style.opacity = 0;
                 setTimeout(() => document.getElementById('loader').remove(), 1000);
-            }, 2500);
+            }, 2000);
 
             document.getElementById('photo-upload').addEventListener('change', handleUpload);
-            
-            // --- CRITICAL FIX FOR UPLOAD FREEZE ---
-            // Listen for window focus. If user comes back from file picker, FORCE PLAY VIDEO.
-            window.addEventListener('focus', () => {
-                if (videoElement && videoElement.paused && videoElement.srcObject) {
-                    console.log("Window focused, reviving video...");
-                    videoElement.play();
-                }
-            });
         };
 
-        // --- Vision System (Simplified & Robust) ---
-        async function initVisionSystem() {
-            videoElement = document.getElementById('cam-preview');
-            const indicator = document.getElementById('vision-indicator');
-            const status = document.getElementById('status-box');
+        // --- Three.js Setup ---
+        function initThree() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.015);
 
-            if (typeof Hands === 'undefined') {
-                status.innerText = "Error: MediaPipe Lib Failed";
-                indicator.style.background = "red";
-                return;
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 200);
+            camera.position.set(0, 2, 40);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.toneMapping = THREE.ReinhardToneMapping;
+            document.body.appendChild(renderer.domElement);
+
+            const renderScene = new THREE.RenderPass(scene, camera);
+            const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = CONFIG.bloomThreshold;
+            bloomPass.strength = CONFIG.bloomStrength;
+            bloomPass.radius = CONFIG.bloomRadius;
+
+            composer = new THREE.EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            const ambient = new THREE.AmbientLight(0xffffff, 0.2);
+            scene.add(ambient);
+            const point = new THREE.PointLight(0xffaa00, 1, 50);
+            point.position.set(0, 10, 10);
+            scene.add(point);
+
+            scene.add(photoGroup);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                composer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function initScene() {
+            const geo = new THREE.SphereGeometry(0.08, 4, 4);
+            const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            particlesMesh = new THREE.InstancedMesh(geo, mat, CONFIG.particleCount);
+            
+            const color = new THREE.Color();
+            for(let i=0; i<CONFIG.particleCount; i++) {
+                const angle = i * 0.1;
+                const h = (i / CONFIG.particleCount) * 40 - 20;
+                const r = (1 - (i / CONFIG.particleCount)) * 12;
+                
+                particleData.push({
+                    tree: {x: Math.cos(angle) * r, y: h, z: Math.sin(angle) * r},
+                    scatter: {x: (Math.random()-0.5) * 100, y: (Math.random()-0.5) * 100, z: (Math.random()-0.5) * 50},
+                    speed: Math.random() * 0.5 + 0.5
+                });
+
+                const cHex = CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)];
+                color.setHex(cHex);
+                particlesMesh.setColorAt(i, color);
             }
+            scene.add(particlesMesh);
+            createPlaceholders();
+        }
 
-            indicator.style.background = "yellow"; // Loading
-            
-            try {
-                // 1. Setup MediaPipe
-                hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-                hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
-
-                hands.onResults(onHandsResults);
-
-                // 2. Setup Camera
-                // We ask specifically for low res to prevent performance bottlenecks
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
-                videoElement.srcObject = stream;
-                
-                await videoElement.play(); // Wait for play
-                
-                status.innerText = "Vision Active";
-                indicator.style.background = "#00aa00"; // Greenish
-                
-                // 3. Start Loop
-                startProcessingLoop();
-
-            } catch (err) {
-                console.error("Vision Init Error:", err);
-                status.innerText = "Cam Denied/Error";
-                indicator.style.background = "red";
+        function createPlaceholders() {
+            for(let i=0; i<5; i++) {
+                const mat = new THREE.MeshBasicMaterial({ color: 0xffd700, side: THREE.DoubleSide, transparent:true, opacity:0.3 });
+                const mesh = new THREE.Mesh(new THREE.PlaneGeometry(4, 3), mat);
+                setupMeshPos(mesh, i, 5);
+                photoGroup.add(mesh);
+                photos.push(mesh);
             }
         }
 
-        // Processing Loop (Decoupled from render loop)
-        function startProcessingLoop() {
-            if(visionLoopId) clearInterval(visionLoopId);
-            visionLoopId = setInterval(async () => {
-                // Only send if video is actually playing and has dimensions
-                if (hands && videoElement && !videoElement.paused && videoElement.videoWidth > 0) {
-                    try {
-                        await hands.send({image: videoElement});
-                    } catch(e) { }
-                }
-            }, 100); // 10 FPS is enough for gestures
+        function setupMeshPos(mesh, i, total) {
+            const t = i / total;
+            const angle = t * Math.PI * 6;
+            const radius = 12 * (1-t) + 2;
+            const height = t * 30 - 15;
+            mesh.position.set(Math.cos(angle)*radius, height, Math.sin(angle)*radius);
+            mesh.lookAt(0, height, 0);
+            mesh.userData = {
+                originPos: mesh.position.clone(),
+                originRot: mesh.rotation.clone(),
+                scatterPos: new THREE.Vector3((Math.random()-0.5)*80, (Math.random()-0.5)*80, (Math.random()-0.5)*40)
+            };
         }
 
-        let gestureBuffer = [];
-        function onHandsResults(results) {
-            const indicator = document.getElementById('vision-indicator');
-            // Blink Green to show heartbeat
-            indicator.style.background = (Date.now() % 500 < 250) ? "#00ff00" : "#004400";
-
-            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
-            
-            const lm = results.multiHandLandmarks[0];
-            const gesture = detectGesture(lm);
-            
-            gestureBuffer.push(gesture);
-            if(gestureBuffer.length > 3) gestureBuffer.shift(); 
-            
-            // Majority voting for stability
-            const counts = {};
-            gestureBuffer.forEach(x => counts[x] = (counts[x] || 0) + 1);
-            const stableGesture = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
-
-            if (stableGesture === 'fist') toTree();
-            else if (stableGesture === 'open') toScatter();
-            else if (stableGesture === 'pinch') toZoom();
-        }
-
-        function detectGesture(lm) {
-            const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
-            if (pinchDist < 0.05) return 'pinch'; 
-
-            // Fold detection
-            const foldedCount = [
-                lm[8].y > lm[6].y, lm[12].y > lm[10].y, 
-                lm[16].y > lm[14].y, lm[20].y > lm[18].y
-            ].filter(Boolean).length;
-
-            if (foldedCount >= 3) return 'fist';
-            if (foldedCount === 0) return 'open';
-            return 'none';
-        }
-
-        // --- Upload Handling (Soft Resume) ---
+        // --- Upload Handling (The Critical Fix) ---
         async function handleUpload(e) {
             const files = Array.from(e.target.files);
-            // DO NOT STOP CAMERA HERE. Let the browser handle it.
-            // When user returns, 'focus' event triggers videoElement.play()
-            
             if(files.length === 0) return;
+
             const btnText = document.getElementById('upload-text');
             btnText.innerText = "Processing...";
 
-            // Reset Zoom
+            // 1. CRITICAL: KILL THE CAMERA MANUALLY BEFORE PROCESSING
+            // This prevents the browser from holding onto a "zombie" stream
+            stopCamera();
+
             activePhotoIndex = -1;
             if(currentState === STATE.ZOOM) {
                 gsap.to(camera.position, {x:0, y:2, z:40, duration:1});
@@ -335,8 +315,7 @@
                 });
 
                 const loadedData = await Promise.all(promises);
-                
-                // Clear old
+
                 while(photoGroup.children.length > 0) {
                     const old = photoGroup.children[0];
                     if(old.geometry) old.geometry.dispose();
@@ -345,7 +324,6 @@
                 }
                 photos = [];
 
-                // Create new
                 loadedData.forEach((data, i) => {
                     const h = 4;
                     const w = h * data.ratio;
@@ -360,7 +338,7 @@
                     photos.push(mesh);
                 });
                 
-                updateStatus(`Loaded ${loadedData.length} Photos`);
+                updateStatus(`Loaded ${loadedData.length} Photos!`);
                 gsap.killTweensOf(animVal);
                 animVal.val = 0; 
                 currentState = STATE.TREE;
@@ -370,89 +348,21 @@
                 updateStatus("Upload Failed");
             } finally {
                 btnText.innerText = "Upload Memories";
-                // Safety check: ensure video plays
-                if (videoElement && videoElement.paused) videoElement.play();
+                // 2. CRITICAL: START A FRESH CAMERA STREAM
+                // We ask for a new stream explicitly after processing is done
+                setTimeout(startCamera, 500); 
             }
         }
 
-        // --- Three.js Logic ---
-        function initThree() {
-            scene = new THREE.Scene();
-            scene.fog = new THREE.FogExp2(0x000000, 0.015);
-            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 200);
-            camera.position.set(0, 2, 40);
-            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-            renderer.toneMapping = THREE.ReinhardToneMapping;
-            document.body.appendChild(renderer.domElement);
-
-            const renderScene = new THREE.RenderPass(scene, camera);
-            const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-            bloomPass.threshold = CONFIG.bloomThreshold; bloomPass.strength = CONFIG.bloomStrength; bloomPass.radius = CONFIG.bloomRadius;
-            composer = new THREE.EffectComposer(renderer);
-            composer.addPass(renderScene); composer.addPass(bloomPass);
-            scene.add(new THREE.AmbientLight(0xffffff, 0.2));
-            const point = new THREE.PointLight(0xffaa00, 1, 50);
-            point.position.set(0, 10, 10); scene.add(point);
-            scene.add(photoGroup);
-
-            window.addEventListener('resize', () => {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, window.innerHeight);
-                composer.setSize(window.innerWidth, window.innerHeight);
-            });
-        }
-
-        function initScene() {
-            const geo = new THREE.SphereGeometry(0.08, 4, 4);
-            const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-            particlesMesh = new THREE.InstancedMesh(geo, mat, CONFIG.particleCount);
-            const color = new THREE.Color();
-            for(let i=0; i<CONFIG.particleCount; i++) {
-                const angle = i * 0.1;
-                const h = (i / CONFIG.particleCount) * 40 - 20;
-                const r = (1 - (i / CONFIG.particleCount)) * 12;
-                particleData.push({
-                    tree: {x: Math.cos(angle) * r, y: h, z: Math.sin(angle) * r},
-                    scatter: {x: (Math.random()-0.5) * 100, y: (Math.random()-0.5) * 100, z: (Math.random()-0.5) * 50},
-                    speed: Math.random() * 0.5 + 0.5
-                });
-                color.setHex(CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)]);
-                particlesMesh.setColorAt(i, color);
-            }
-            scene.add(particlesMesh);
-            createPlaceholders();
-        }
-
-        function createPlaceholders() {
-            for(let i=0; i<5; i++) {
-                const mat = new THREE.MeshBasicMaterial({ color: 0xffd700, side: THREE.DoubleSide, transparent:true, opacity:0.3 });
-                const mesh = new THREE.Mesh(new THREE.PlaneGeometry(4, 3), mat);
-                setupMeshPos(mesh, i, 5);
-                photoGroup.add(mesh);
-                photos.push(mesh);
-            }
-        }
-        function setupMeshPos(mesh, i, total) {
-            const t = i / total;
-            const angle = t * Math.PI * 6;
-            const radius = 12 * (1-t) + 2;
-            const height = t * 30 - 15;
-            mesh.position.set(Math.cos(angle)*radius, height, Math.sin(angle)*radius);
-            mesh.lookAt(0, height, 0);
-            mesh.userData = {
-                originPos: mesh.position.clone(), originRot: mesh.rotation.clone(),
-                scatterPos: new THREE.Vector3((Math.random()-0.5)*80, (Math.random()-0.5)*80, (Math.random()-0.5)*40)
-            };
-        }
-
+        // --- Render Loop ---
         function animate() {
             requestAnimationFrame(animate);
             const time = Date.now() * 0.001;
+
             if(currentState === STATE.TREE) scene.rotation.y = Math.sin(time * 0.2) * 0.2;
             else if (currentState === STATE.SCATTER) scene.rotation.y += 0.005;
+
+            // Particles
             for(let i=0; i<CONFIG.particleCount; i++) {
                 const d = particleData[i];
                 const x = THREE.MathUtils.lerp(d.tree.x, d.scatter.x, animVal.val);
@@ -464,6 +374,8 @@
                 particlesMesh.setMatrixAt(i, dummy.matrix);
             }
             particlesMesh.instanceMatrix.needsUpdate = true;
+
+            // Photos
             if(currentState !== STATE.ZOOM && photos.length > 0) {
                 photos.forEach(p => {
                     if(!p.userData.originPos) return;
@@ -476,37 +388,159 @@
                     }
                 });
             }
+
             composer.render();
         }
+        animate();
 
         function toTree() {
             if(currentState === STATE.TREE || isAnimating) return;
-            isAnimating = true; currentState = STATE.TREE; updateStatus("Mode: Christmas Tree");
+            isAnimating = true;
+            currentState = STATE.TREE;
+            updateStatus("Mode: Christmas Tree");
             gsap.to(camera.position, {x: 0, y: 2, z: 40, duration: 1.5});
             gsap.to(camera.rotation, {x:0, y:0, z:0, duration: 1.5});
-            if(activePhotoIndex !== -1 && photos[activePhotoIndex]) gsap.to(photos[activePhotoIndex].scale, {x:1, y:1, z:1, duration: 1});
+            if(activePhotoIndex !== -1 && photos[activePhotoIndex]) {
+                gsap.to(photos[activePhotoIndex].scale, {x:1, y:1, z:1, duration: 1});
+            }
             activePhotoIndex = -1;
             gsap.to(animVal, { val: 0, duration: 2, ease: "power2.inOut", onComplete: () => isAnimating = false });
         }
+
         function toScatter() {
             if(currentState === STATE.SCATTER || isAnimating) return;
-            isAnimating = true; currentState = STATE.SCATTER; updateStatus("Mode: Starry Sky");
-            if(activePhotoIndex !== -1 && photos[activePhotoIndex]) gsap.to(photos[activePhotoIndex].scale, {x:1, y:1, z:1, duration: 1});
+            isAnimating = true;
+            currentState = STATE.SCATTER;
+            updateStatus("Mode: Starry Sky");
+            if(activePhotoIndex !== -1 && photos[activePhotoIndex]) {
+                 gsap.to(photos[activePhotoIndex].scale, {x:1, y:1, z:1, duration: 1});
+            }
             activePhotoIndex = -1;
             gsap.to(animVal, { val: 1, duration: 2.5, ease: "power3.out", onComplete: () => isAnimating = false });
         }
+
         function toZoom() {
             if(currentState === STATE.ZOOM || isAnimating) return;
             if(photos.length === 0) { updateStatus("No Photos!"); return; }
-            isAnimating = true; currentState = STATE.ZOOM; updateStatus("Mode: Memory View");
+            isAnimating = true;
+            currentState = STATE.ZOOM;
+            updateStatus("Mode: Memory View");
             activePhotoIndex = Math.floor(Math.random() * photos.length);
             const target = photos[activePhotoIndex];
-            const vec = new THREE.Vector3(0, 0, -8); vec.applyQuaternion(camera.quaternion); vec.add(camera.position);
+            const vec = new THREE.Vector3(0, 0, -8);
+            vec.applyQuaternion(camera.quaternion);
+            vec.add(camera.position);
             gsap.to(target.position, { x: vec.x, y: vec.y, z: vec.z, duration: 1.5, ease: "back.out(1.2)" });
             gsap.to(target.rotation, { x: camera.rotation.x, y: camera.rotation.y, z: camera.rotation.z, duration: 1.5 });
             gsap.to(target.scale, {x: 2, y: 2, z: 2, duration: 1.5, onComplete: () => isAnimating = false});
         }
-        function updateStatus(t) { const el = document.getElementById('status-box'); el.innerText = t; }
+
+        function updateStatus(text) {
+            const el = document.getElementById('status-box');
+            el.innerText = text;
+            el.style.borderColor = "#D4AF37";
+            el.style.color = "#fff";
+            setTimeout(() => {
+                el.style.borderColor = "rgba(255,255,255,0.3)";
+                el.style.color = "#88ccff";
+            }, 1000);
+        }
+
+        // ===============================================
+        //  VISION SYSTEM (Manual Stream Management)
+        // ===============================================
+        
+        function initVisionSystem() {
+            videoElement = document.getElementById('cam-preview');
+            const indicator = document.getElementById('vision-indicator');
+            indicator.style.background = "yellow"; 
+
+            hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+
+            let gestureBuffer = []; 
+            hands.onResults(results => {
+                // Heartbeat Visual
+                indicator.style.background = (Date.now() % 500 < 250) ? "#00ff00" : "#004400"; 
+
+                if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+                const lm = results.multiHandLandmarks[0];
+                
+                const gesture = detectGesture(lm);
+                gestureBuffer.push(gesture);
+                if(gestureBuffer.length > 3) gestureBuffer.shift(); 
+                
+                const counts = {};
+                gestureBuffer.forEach(x => counts[x] = (counts[x] || 0) + 1);
+                const stableGesture = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+
+                if (stableGesture === 'fist') toTree();
+                else if (stableGesture === 'open') toScatter();
+                else if (stableGesture === 'pinch') toZoom();
+            });
+
+            startCamera();
+            startProcessingLoop();
+        }
+
+        // Kill the stream to free the webcam
+        function stopCamera() {
+            if (videoElement && videoElement.srcObject) {
+                const tracks = videoElement.srcObject.getTracks();
+                tracks.forEach(track => track.stop());
+                videoElement.srcObject = null;
+                document.getElementById('vision-indicator').style.background = "black";
+            }
+        }
+
+        // Request a fresh stream
+        async function startCamera() {
+            // First ensure it's stopped
+            stopCamera();
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+                videoElement.srcObject = stream;
+                await videoElement.play();
+                updateStatus("Vision Active");
+            } catch (err) {
+                console.error("Camera Start Error:", err);
+                document.getElementById('vision-indicator').style.background = "red";
+                updateStatus("Cam Error");
+            }
+        }
+        
+        // Exposed function for the manual button
+        function restartCameraForce() {
+            updateStatus("Restarting Cam...");
+            startCamera();
+        }
+
+        function startProcessingLoop() {
+            if(visionLoopId) clearInterval(visionLoopId);
+            visionLoopId = setInterval(async () => {
+                // Extra safety: Don't send if video width is 0 (broken stream)
+                if (hands && videoElement && !videoElement.paused && videoElement.videoWidth > 0) {
+                    try {
+                        await hands.send({image: videoElement});
+                    } catch(e) { }
+                }
+            }, 100); 
+        }
+
+        function detectGesture(lm) {
+            const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+            if (pinchDist < 0.05) return 'pinch'; 
+
+            const foldedCount = [
+                lm[8].y > lm[6].y, lm[12].y > lm[10].y, 
+                lm[16].y > lm[14].y, lm[20].y > lm[18].y
+            ].filter(Boolean).length;
+
+            if (foldedCount >= 3) return 'fist';
+            if (foldedCount === 0) return 'open';
+            return 'none';
+        }
     </script>
 </body>
 </html>
