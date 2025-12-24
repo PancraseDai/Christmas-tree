@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Magical Gesture Xmas Tree (Stable)</title>
+    <title>Magical Gesture Xmas Tree (Final Fix)</title>
     
     <style>
         body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
@@ -37,6 +37,7 @@
             pointer-events: auto; width: 100%; max-width: 1200px; margin: 0 auto;
         }
 
+        /* Camera Preview Container */
         .cam-wrapper {
             position: relative;
             width: 160px; height: 120px;
@@ -44,22 +45,29 @@
             overflow: hidden;
             border: 2px solid #333;
             box-shadow: 0 0 20px rgba(0,0,0,0.5);
-            background: #000;
+            background: #222;
         }
         #cam-preview {
             width: 100%; height: 100%; object-fit: cover;
             transform: scaleX(-1);
-            background: #111;
+            background: #000;
         }
-        /* DEBUG INDICATOR */
+        
+        /* Indicators & Buttons */
         #vision-indicator {
             position: absolute; top: 10px; left: 10px;
             width: 12px; height: 12px; border-radius: 50%;
-            background: blue; /* Default Blue: Waiting */
-            z-index: 5;
-            border: 2px solid #fff;
-            box-shadow: 0 0 5px #000;
+            background: blue; 
+            z-index: 5; border: 2px solid #fff; box-shadow: 0 0 5px #000;
         }
+        #manual-restart {
+            position: absolute; bottom: 5px; right: 5px;
+            background: rgba(255,255,255,0.2); color: white;
+            border: 1px solid rgba(255,255,255,0.4);
+            font-size: 10px; padding: 2px 6px; cursor: pointer;
+            z-index: 6; border-radius: 4px;
+        }
+        #manual-restart:hover { background: rgba(255,255,255,0.4); }
 
         .instructions {
             background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);
@@ -132,9 +140,9 @@
             </label>
 
             <div class="cam-wrapper">
-                <!-- Status Indicator: Blue=Wait, Yellow=Init, Green=OK, Red=Dead -->
                 <div id="vision-indicator" title="Status Indicator"></div>
                 <video id="cam-preview" playsinline autoplay muted></video>
+                <button id="manual-restart" onclick="restartCameraForce()">Restart Cam</button>
             </div>
         </div>
     </div>
@@ -166,13 +174,12 @@
         let hands;
         let videoElement;
         let visionLoopId;
-        let heartbeatId; // The Doctor that keeps camera alive
 
         // --- Init ---
         window.onload = () => {
             initThree();
             initScene();
-            initVisionSystem(); // The Heartbeat System
+            initVisionSystem(); 
             
             setTimeout(() => {
                 document.getElementById('loader').style.opacity = 0;
@@ -271,17 +278,17 @@
             };
         }
 
-        // --- Upload Handling (Safe) ---
+        // --- Upload Handling (The Critical Fix) ---
         async function handleUpload(e) {
             const files = Array.from(e.target.files);
-            
-            // Note: File picker just paused the video.
-            // We rely on the Heartbeat system to restart it automatically.
-            
             if(files.length === 0) return;
 
             const btnText = document.getElementById('upload-text');
             btnText.innerText = "Processing...";
+
+            // 1. CRITICAL: KILL THE CAMERA MANUALLY BEFORE PROCESSING
+            // This prevents the browser from holding onto a "zombie" stream
+            stopCamera();
 
             activePhotoIndex = -1;
             if(currentState === STATE.ZOOM) {
@@ -341,6 +348,9 @@
                 updateStatus("Upload Failed");
             } finally {
                 btnText.innerText = "Upload Memories";
+                // 2. CRITICAL: START A FRESH CAMERA STREAM
+                // We ask for a new stream explicitly after processing is done
+                setTimeout(startCamera, 500); 
             }
         }
 
@@ -437,21 +447,20 @@
         }
 
         // ===============================================
-        //  THE HEARTBEAT VISION SYSTEM (The Ultimate Fix)
+        //  VISION SYSTEM (Manual Stream Management)
         // ===============================================
         
         function initVisionSystem() {
             videoElement = document.getElementById('cam-preview');
             const indicator = document.getElementById('vision-indicator');
-            indicator.style.background = "yellow"; // Initializing
+            indicator.style.background = "yellow"; 
 
-            // 1. Setup MediaPipe
             hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
             hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
 
             let gestureBuffer = []; 
             hands.onResults(results => {
-                // Heartbeat Visual: Green Flash
+                // Heartbeat Visual
                 indicator.style.background = (Date.now() % 500 < 250) ? "#00ff00" : "#004400"; 
 
                 if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
@@ -470,73 +479,63 @@
                 else if (stableGesture === 'pinch') toZoom();
             });
 
-            // 2. Start Camera Initially
             startCamera();
-
-            // 3. Start Heartbeat (The Doctor)
-            // This checks every 2 seconds if the camera is dead (e.g., after upload) and revives it.
-            heartbeatId = setInterval(() => {
-                checkCameraHealth();
-            }, 2000);
-
-            // 4. Start Processing Loop
             startProcessingLoop();
         }
 
+        // Kill the stream to free the webcam
+        function stopCamera() {
+            if (videoElement && videoElement.srcObject) {
+                const tracks = videoElement.srcObject.getTracks();
+                tracks.forEach(track => track.stop());
+                videoElement.srcObject = null;
+                document.getElementById('vision-indicator').style.background = "black";
+            }
+        }
+
+        // Request a fresh stream
         async function startCamera() {
+            // First ensure it's stopped
+            stopCamera();
+            
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
                 videoElement.srcObject = stream;
                 await videoElement.play();
                 updateStatus("Vision Active");
             } catch (err) {
-                console.error("Camera Error:", err);
+                console.error("Camera Start Error:", err);
                 document.getElementById('vision-indicator').style.background = "red";
                 updateStatus("Cam Error");
             }
         }
-
-        function checkCameraHealth() {
-            const ind = document.getElementById('vision-indicator');
-            
-            // Check 1: Is video paused? (Common after upload)
-            if (videoElement && videoElement.paused && videoElement.srcObject) {
-                console.log("Heartbeat: Video paused, reviving...");
-                videoElement.play().catch(e => console.log("Revive fail, hard reset needed"));
-            }
-
-            // Check 2: Is video completely dead (black/0 size)?
-            if (videoElement && (videoElement.videoWidth === 0 || !videoElement.srcObject)) {
-                console.log("Heartbeat: Video dead, performing Hard Reset...");
-                ind.style.background = "red";
-                startCamera(); // Re-request stream
-            }
+        
+        // Exposed function for the manual button
+        function restartCameraForce() {
+            updateStatus("Restarting Cam...");
+            startCamera();
         }
 
         function startProcessingLoop() {
             if(visionLoopId) clearInterval(visionLoopId);
             visionLoopId = setInterval(async () => {
-                // Safety: Only send if video has actual data
+                // Extra safety: Don't send if video width is 0 (broken stream)
                 if (hands && videoElement && !videoElement.paused && videoElement.videoWidth > 0) {
                     try {
                         await hands.send({image: videoElement});
-                    } catch(e) { 
-                        /* Ignore transient errors */ 
-                    }
+                    } catch(e) { }
                 }
-            }, 100); // 10 FPS
+            }, 100); 
         }
 
         function detectGesture(lm) {
             const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
             if (pinchDist < 0.05) return 'pinch'; 
 
-            const indexFolded = lm[8].y > lm[6].y;
-            const middleFolded = lm[12].y > lm[10].y;
-            const ringFolded = lm[16].y > lm[14].y;
-            const pinkyFolded = lm[20].y > lm[18].y;
-
-            const foldedCount = [indexFolded, middleFolded, ringFolded, pinkyFolded].filter(Boolean).length;
+            const foldedCount = [
+                lm[8].y > lm[6].y, lm[12].y > lm[10].y, 
+                lm[16].y > lm[14].y, lm[20].y > lm[18].y
+            ].filter(Boolean).length;
 
             if (foldedCount >= 3) return 'fist';
             if (foldedCount === 0) return 'open';
