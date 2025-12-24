@@ -50,17 +50,12 @@
             width: 100%; height: 100%; object-fit: cover;
             transform: scaleX(-1);
         }
-        .cam-overlay {
-            position: absolute; bottom: 0; left: 0; width: 100%;
-            background: rgba(0,0,0,0.7); color: #fff; font-size: 10px;
-            text-align: center; padding: 2px 0;
-            z-index: 2;
-        }
-        #restart-cam {
-            position: absolute; top: 5px; right: 5px;
-            background: rgba(255, 0, 0, 0.7); color: white;
-            border: none; border-radius: 3px; font-size: 9px;
-            cursor: pointer; padding: 2px 5px; z-index: 5;
+        /* Debug Indicator */
+        #vision-indicator {
+            position: absolute; top: 10px; left: 10px;
+            width: 10px; height: 10px; border-radius: 50%;
+            background: red; z-index: 5;
+            box-shadow: 0 0 5px rgba(0,0,0,1);
         }
 
         .instructions {
@@ -134,9 +129,9 @@
             </label>
 
             <div class="cam-wrapper">
-                <button id="restart-cam" onclick="forceRestartCamera()">Restart Cam</button>
-                <video id="cam-preview" playsinline autoplay muted></video>
-                <div class="cam-overlay">Vision AI Active</div>
+                <div id="vision-indicator" title="Red:Off Yellow:Init Green:Active"></div>
+                <!-- FORCE WIDTH/HEIGHT Attributes for MediaPipe Stability -->
+                <video id="cam-preview" width="320" height="240" playsinline autoplay muted></video>
             </div>
         </div>
     </div>
@@ -167,14 +162,13 @@
         // --- MediaPipe Globals ---
         let hands;
         let videoElement;
-        let visionQueue = []; // Queue for frames to process
-        let isProcessingVision = false; // Flag for processing loop
+        let visionInterval;
 
         // --- Init ---
         window.onload = () => {
             initThree();
             initScene();
-            initMediaPipeManual(); 
+            initMediaPipeRobust(); // NEW ROBUST INIT
             
             setTimeout(() => {
                 document.getElementById('loader').style.opacity = 0;
@@ -182,12 +176,14 @@
             }, 2000);
 
             document.getElementById('photo-upload').addEventListener('change', handleUpload);
+            
+            // Re-awaken video on tab focus
             window.addEventListener('focus', () => {
-                if(videoElement && videoElement.paused) videoElement.play().catch(e => {});
+                if(videoElement && videoElement.paused) videoElement.play().catch(e=>{});
             });
         };
 
-        // --- Three.js Setup ---
+        // --- Three.js Setup (Visuals) ---
         function initThree() {
             scene = new THREE.Scene();
             scene.fog = new THREE.FogExp2(0x000000, 0.015);
@@ -276,16 +272,19 @@
             };
         }
 
-        // --- UPLOAD HANDLING ---
+        // --- Upload Handling ---
         async function handleUpload(e) {
             const files = Array.from(e.target.files);
-            setTimeout(ensureCameraRunning, 500); 
+            
+            // Try to keep camera alive or restart it shortly
+            setTimeout(checkVideoState, 1000);
 
             if(files.length === 0) return;
 
             const btnText = document.getElementById('upload-text');
             btnText.innerText = "Processing...";
 
+            // Reset current view
             activePhotoIndex = -1;
             if(currentState === STATE.ZOOM) {
                 gsap.to(camera.position, {x:0, y:2, z:40, duration:1});
@@ -344,28 +343,11 @@
                 updateStatus("Upload Failed");
             } finally {
                 btnText.innerText = "Upload Memories";
-                ensureCameraRunning(); 
+                checkVideoState();
             }
         }
 
-        // --- Camera Recovery ---
-        function ensureCameraRunning() {
-            if(videoElement && videoElement.paused && videoElement.srcObject) {
-                console.log("Force resuming video...");
-                videoElement.play().catch(e => console.log(e));
-            }
-        }
-
-        async function forceRestartCamera() {
-             isProcessingVision = false; // Stop the queue processor
-             if(videoElement && videoElement.srcObject) {
-                 const tracks = videoElement.srcObject.getTracks();
-                 tracks.forEach(t => t.stop());
-             }
-             initMediaPipeManual();
-        }
-
-        // --- Main Loop ---
+        // --- Render Loop ---
         function animate() {
             requestAnimationFrame(animate);
             const time = Date.now() * 0.001;
@@ -401,123 +383,10 @@
             }
 
             composer.render();
-            
-            // --- Vision Queue Processing ---
-            // Check if we have frames to process AND the vision engine is ready
-            if (visionQueue.length > 0 && !isProcessingVision) {
-                processVisionFrame();
-            }
         }
         animate();
 
-        // --- Vision Frame Processing ---
-        function processVisionFrame() {
-            isProcessingVision = true;
-            const frame = visionQueue.shift(); // Get the oldest frame
-
-            hands.send({image: frame})
-                .then(results => {
-                    try {
-                        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                            const lm = results.multiHandLandmarks[0];
-                            handleGesture(lm); // Process results
-                        }
-                    } catch (e) {
-                        console.warn("Gesture processing error:", e);
-                    } finally {
-                        isProcessingVision = false; // Allow next frame
-                    }
-                })
-                .catch(e => {
-                    console.error("MediaPipe send error:", e);
-                    isProcessingVision = false; // Allow next frame even on error
-                });
-        }
-
-        // --- Manual MediaPipe Init ---
-        async function initMediaPipeManual() {
-            videoElement = document.getElementById('cam-preview');
-            
-            hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
-
-            let gestureBuffer = []; 
-
-            // --- IMPORTANT: Process results in the queue, NOT directly here ---
-            hands.onResults(results => {
-                // Push results to the queue to be processed by processVisionFrame
-                visionQueue.push(results);
-            });
-
-            // Fetch camera stream
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
-                videoElement.srcObject = stream;
-                videoElement.onloadedmetadata = () => {
-                    videoElement.play();
-                    // Start the vision processing loop *after* camera is ready
-                    startVisionLoop(); 
-                };
-            } catch (err) {
-                console.error("Camera Error:", err);
-                updateStatus("Camera Denied");
-            }
-        }
-
-        // --- Start the continuous vision processing loop ---
-        function startVisionLoop() {
-            if (!videoElement || !hands) return;
-            
-            const sendFrame = () => {
-                if (videoElement.readyState >= 2 && !videoElement.paused) {
-                    // Add frame to the queue for processing
-                    visionQueue.push(videoElement); 
-                }
-                // Schedule the next frame capture
-                requestAnimationFrame(sendFrame);
-            };
-            sendFrame(); // Start the loop
-        }
-
-        // --- Gesture Detection ---
-        function handleGesture(results) { // Renamed from onResults to avoid confusion
-            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
-            
-            const lm = results.multiHandLandmarks[0];
-            const gesture = detectGesture(lm);
-            
-            let gestureBuffer = []; // Local buffer for smoothing
-            gestureBuffer.push(gesture);
-            if(gestureBuffer.length > 5) gestureBuffer.shift();
-            
-            const counts = {};
-            gestureBuffer.forEach(x => counts[x] = (counts[x] || 0) + 1);
-            const stableGesture = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
-
-            if (stableGesture === 'fist') toTree();
-            else if (stableGesture === 'open') toScatter();
-            else if (stableGesture === 'pinch') toZoom();
-        }
-
-        function detectGesture(lm) {
-            // Adjusted thresholds for better detection
-            const pinchThreshold = 0.045; 
-            const thumbTip = lm[4];
-            const indexTip = lm[8];
-            const pinchDist = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
-            if (pinchDist < pinchThreshold) return 'pinch'; 
-
-            const foldedCount = [
-                lm[8].y > lm[6].y, lm[12].y > lm[10].y, 
-                lm[16].y > lm[14].y, lm[20].y > lm[18].y
-            ].filter(Boolean).length;
-
-            if (foldedCount === 4) return 'fist';
-            if (foldedCount === 0) return 'open';
-            return 'none';
-        }
-
-        // --- Logic ---
+        // --- State Logic ---
         function toTree() {
             if(currentState === STATE.TREE || isAnimating) return;
             isAnimating = true;
@@ -569,6 +438,104 @@
                 el.style.borderColor = "rgba(255,255,255,0.3)";
                 el.style.color = "#88ccff";
             }, 1000);
+        }
+
+        // ==========================================
+        //  ROBUST VISION SYSTEM (The Fix)
+        // ==========================================
+        async function initMediaPipeRobust() {
+            videoElement = document.getElementById('cam-preview');
+            const indicator = document.getElementById('vision-indicator');
+            
+            indicator.style.background = "yellow"; // Initializing
+
+            hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            
+            // Reduced complexity for speed, high confidence to prevent ghosting
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+
+            let gestureBuffer = []; 
+
+            hands.onResults(results => {
+                // Flash green to indicate successful frame processing
+                indicator.style.background = (Date.now() % 500 < 250) ? "#00ff00" : "#004400"; 
+
+                if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+                const lm = results.multiHandLandmarks[0];
+                const gesture = detectGesture(lm);
+                
+                gestureBuffer.push(gesture);
+                if(gestureBuffer.length > 3) gestureBuffer.shift(); // Smaller buffer for faster response
+                
+                const counts = {};
+                gestureBuffer.forEach(x => counts[x] = (counts[x] || 0) + 1);
+                const stableGesture = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+
+                if (stableGesture === 'fist') toTree();
+                else if (stableGesture === 'open') toScatter();
+                else if (stableGesture === 'pinch') toZoom();
+            });
+
+            // Start Camera
+            try {
+                // Request specific low resolution for performance
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 320, height: 240, facingMode: "user" } 
+                });
+                videoElement.srcObject = stream;
+                
+                // IMPORTANT: Ensure video plays
+                await videoElement.play();
+                
+                // Start separate detection loop, decoupled from Three.js
+                startDetectionLoop();
+            } catch (err) {
+                console.error("Camera Error:", err);
+                indicator.style.background = "red";
+                updateStatus("Camera Access Denied");
+            }
+        }
+
+        function checkVideoState() {
+            if(videoElement && videoElement.paused && videoElement.srcObject) {
+                videoElement.play();
+            }
+        }
+
+        // Independent loop: 10 FPS (100ms)
+        function startDetectionLoop() {
+            if(visionInterval) clearInterval(visionInterval);
+            
+            visionInterval = setInterval(async () => {
+                // Only send if video is ready and playing
+                if (hands && videoElement && !videoElement.paused && videoElement.readyState >= 2) {
+                    try {
+                        await hands.send({image: videoElement});
+                    } catch(e) {
+                        // Silent fail, just wait for next tick
+                        console.warn("Vision Frame Dropped");
+                    }
+                }
+            }, 100);
+        }
+
+        function detectGesture(lm) {
+            // Pinch: Thumb Tip (4) close to Index Tip (8)
+            const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+            if (pinchDist < 0.05) return 'pinch'; 
+
+            // Fold Check: Tip y > PIP y (Joint)
+            // Note: Coordinate system might vary slightly, but generally y increases downwards
+            const indexFolded = lm[8].y > lm[6].y;
+            const middleFolded = lm[12].y > lm[10].y;
+            const ringFolded = lm[16].y > lm[14].y;
+            const pinkyFolded = lm[20].y > lm[18].y;
+
+            const foldedCount = [indexFolded, middleFolded, ringFolded, pinkyFolded].filter(Boolean).length;
+
+            if (foldedCount >= 3) return 'fist'; // Allow 3 fingers (sometimes pinky is weird)
+            if (foldedCount === 0) return 'open';
+            return 'none';
         }
     </script>
 </body>
