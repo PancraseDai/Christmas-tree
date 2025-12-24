@@ -167,13 +167,13 @@
         // --- MediaPipe Globals ---
         let hands;
         let videoElement;
-        let isVisionBusy = false; // The Lock to prevent crashing
+        let cameraStream = null; // Holds the MediaStream object
 
         // --- Init ---
         window.onload = () => {
             initThree();
             initScene();
-            initMediaPipeManual(); 
+            initMediaPipeAndCamera(); // Unified initialization
             
             setTimeout(() => {
                 document.getElementById('loader').style.opacity = 0;
@@ -182,9 +182,8 @@
 
             document.getElementById('photo-upload').addEventListener('change', handleUpload);
             
-            // Auto-resume camera if it pauses (window focus logic)
             window.addEventListener('focus', () => {
-                if(videoElement && videoElement.paused) videoElement.play().catch(e => {});
+                if(videoElement && videoElement.paused && cameraStream) videoElement.play().catch(e => {});
             });
         };
 
@@ -281,7 +280,7 @@
         async function handleUpload(e) {
             const files = Array.from(e.target.files);
             
-            // Check Camera Immediately
+            // Ensure camera is running after file picker is closed
             setTimeout(ensureCameraRunning, 500); 
 
             if(files.length === 0) return;
@@ -289,7 +288,7 @@
             const btnText = document.getElementById('upload-text');
             btnText.innerText = "Processing...";
 
-            // Reset Logic
+            // Reset Logic to prevent state corruption
             activePhotoIndex = -1;
             if(currentState === STATE.ZOOM) {
                 gsap.to(camera.position, {x:0, y:2, z:40, duration:1});
@@ -316,6 +315,7 @@
 
                 const loadedData = await Promise.all(promises);
 
+                // Clear old photos safely
                 while(photoGroup.children.length > 0) {
                     const old = photoGroup.children[0];
                     if(old.geometry) old.geometry.dispose();
@@ -324,6 +324,7 @@
                 }
                 photos = [];
 
+                // Add new photos
                 loadedData.forEach((data, i) => {
                     const h = 4;
                     const w = h * data.ratio;
@@ -348,28 +349,113 @@
                 updateStatus("Upload Failed");
             } finally {
                 btnText.innerText = "Upload Memories";
-                ensureCameraRunning(); // Critical recovery step
+                ensureCameraRunning(); // Re-ensure camera after operation
             }
         }
 
-        // --- Camera Recovery ---
+        // --- Camera Control ---
         function ensureCameraRunning() {
-            if(videoElement && videoElement.paused && videoElement.srcObject) {
-                console.log("Force resuming video...");
-                videoElement.play().catch(e => console.log(e));
+            if(videoElement && videoElement.paused && cameraStream) {
+                console.log("Ensuring camera is running...");
+                videoElement.play().catch(e => console.log("Play rejected:", e));
             }
         }
 
         async function forceRestartCamera() {
-             isVisionBusy = false; // Reset lock
-             if(videoElement && videoElement.srcObject) {
-                 const tracks = videoElement.srcObject.getTracks();
-                 tracks.forEach(t => t.stop());
+             console.log("Forcing camera restart...");
+             if(cameraStream) {
+                 cameraStream.getTracks().forEach(t => t.stop());
+                 cameraStream = null;
              }
-             initMediaPipeManual();
+             // Re-init MediaPipe and Camera
+             initMediaPipeAndCamera();
         }
 
-        // --- Main Loop ---
+        // --- Unified MediaPipe and Camera Initialization ---
+        async function initMediaPipeAndCamera() {
+            videoElement = document.getElementById('cam-preview');
+            
+            // Initialize Hands model
+            if (!hands) { // Only initialize Hands model once
+                hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+                hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+            }
+
+            // Gesture buffer for stability
+            let gestureBuffer = []; 
+
+            // MediaPipe Result Handler
+            hands.onResults(results => {
+                if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+                
+                const lm = results.multiHandLandmarks[0];
+                const gesture = detectGesture(lm);
+                
+                // Smooth gesture detection
+                gestureBuffer.push(gesture);
+                if(gestureBuffer.length > 5) gestureBuffer.shift();
+                const counts = {};
+                gestureBuffer.forEach(x => counts[x] = (counts[x] || 0) + 1);
+                const stableGesture = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+
+                // Trigger actions based on stable gesture
+                if (stableGesture === 'fist') toTree();
+                else if (stableGesture === 'open') toScatter();
+                else if (stableGesture === 'pinch') toZoom();
+            });
+
+            // Get Camera Stream
+            try {
+                if (!cameraStream) { // Get stream only if it's not already active
+                    cameraStream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { 
+                            width: { ideal: 320 }, // Request specific resolution
+                            height: { ideal: 240 },
+                            frameRate: { ideal: 30 } // Aim for 30fps
+                        } 
+                    });
+                }
+                videoElement.srcObject = cameraStream;
+                videoElement.onloadedmetadata = () => { videoElement.play(); };
+                
+                // --- Start the video frame processing loop ---
+                const videoTracks = cameraStream.getVideoTracks();
+                if (videoTracks && videoTracks.length > 0) {
+                    const frameRate = videoTracks[0].getSettings().frameRate || 30; // Use actual frame rate if available
+                    const delay = 1000 / frameRate; // Milliseconds per frame
+                    
+                    const processVideoFrame = () => {
+                        if (videoElement.readyState >= 2 && !videoElement.paused && cameraStream) {
+                            // Send frame to MediaPipe
+                            hands.send({image: videoElement}).catch(e => {}); // Catch transient errors
+                        }
+                        // Schedule next frame
+                        setTimeout(processVideoFrame, delay);
+                    };
+                    processVideoFrame(); // Start the loop
+                }
+
+            } catch (err) {
+                console.error("Camera Error:", err);
+                updateStatus("Camera Denied/Error");
+            }
+        }
+
+        function detectGesture(lm) {
+            const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+            if (pinchDist < 0.05) return 'pinch'; 
+
+            const foldedCount = [
+                lm[8].y > lm[6].y, lm[12].y > lm[10].y, 
+                lm[16].y > lm[14].y, lm[20].y > lm[18].y
+            ].filter(Boolean).length;
+
+            if (foldedCount === 4) return 'fist';
+            if (foldedCount === 0) return 'open';
+            return 'none';
+        }
+
+        // --- Animation Loop (Only renders) ---
         function animate() {
             requestAnimationFrame(animate);
             const time = Date.now() * 0.001;
@@ -405,19 +491,10 @@
             }
 
             composer.render();
-            
-            // --- THREAD SAFE VISION LOOP ---
-            // Only send new frame if previous one is done
-            if (hands && videoElement && videoElement.readyState >= 2 && !videoElement.paused && !isVisionBusy) {
-                isVisionBusy = true;
-                hands.send({image: videoElement})
-                    .then(() => { isVisionBusy = false; })
-                    .catch(() => { isVisionBusy = false; });
-            }
         }
         animate();
 
-        // --- Logic ---
+        // --- Logic Transitions ---
         function toTree() {
             if(currentState === STATE.TREE || isAnimating) return;
             isAnimating = true;
@@ -469,59 +546,6 @@
                 el.style.borderColor = "rgba(255,255,255,0.3)";
                 el.style.color = "#88ccff";
             }, 1000);
-        }
-
-        // --- Manual MediaPipe Init ---
-        async function initMediaPipeManual() {
-            videoElement = document.getElementById('cam-preview');
-            
-            hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
-
-            let gestureBuffer = []; 
-
-            hands.onResults(results => {
-                if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
-                const lm = results.multiHandLandmarks[0];
-                const gesture = detectGesture(lm);
-                
-                gestureBuffer.push(gesture);
-                if(gestureBuffer.length > 5) gestureBuffer.shift();
-                
-                const counts = {};
-                gestureBuffer.forEach(x => counts[x] = (counts[x] || 0) + 1);
-                const stableGesture = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
-
-                if (stableGesture === 'fist') toTree();
-                else if (stableGesture === 'open') toScatter();
-                else if (stableGesture === 'pinch') toZoom();
-            });
-
-            // Standard getUserMedia to keep control
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
-                videoElement.srcObject = stream;
-                videoElement.onloadedmetadata = () => {
-                    videoElement.play();
-                };
-            } catch (err) {
-                console.error("Camera Error:", err);
-                updateStatus("Camera Denied");
-            }
-        }
-
-        function detectGesture(lm) {
-            const pinchDist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
-            if (pinchDist < 0.05) return 'pinch'; 
-
-            const foldedCount = [
-                lm[8].y > lm[6].y, lm[12].y > lm[10].y, 
-                lm[16].y > lm[14].y, lm[20].y > lm[18].y
-            ].filter(Boolean).length;
-
-            if (foldedCount === 4) return 'fist';
-            if (foldedCount === 0) return 'open';
-            return 'none';
         }
     </script>
 </body>
